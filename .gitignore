@@ -1,0 +1,5 @@
+build/
+*.o
+*.out
+grayscale
+optical_flow
