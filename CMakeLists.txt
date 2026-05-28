@@ -5,9 +5,10 @@ set(CMAKE_CUDA_ARCHITECTURES 89)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 
-# All .cu files under src/ will be added here as we create them
+# Remember to add .cu files under src/ 
 add_executable(optical_flow
     src/main.cu
+    src/flow/horn_schunck.cu
 )
 
 target_include_directories(optical_flow PRIVATE include)
