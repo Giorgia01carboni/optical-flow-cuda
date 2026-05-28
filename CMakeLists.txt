@@ -9,6 +9,8 @@ set(CMAKE_CUDA_STANDARD 17)
 add_executable(optical_flow
     src/main.cu
     src/flow/horn_schunck.cu
+    src/interp/warp.cu
+    src/interp/blend.cu
 )
 
 target_include_directories(optical_flow PRIVATE include)

@@ -146,7 +146,7 @@ void horn_schunck(
     }
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // if we did an odd number of iterations the final result is in d_u2/d_v2,
+    // if we did an odd number of iterations the final result is in d_u2 and d_v2,
     // copy it back to the output buffers the caller expects
     if (iterations % 2 != 0) {
         CUDA_CHECK(cudaMemcpy(d_u, d_u2, bytes_f, cudaMemcpyDeviceToDevice));
