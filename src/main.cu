@@ -5,6 +5,7 @@
 #include "stb_image_write.h"
 #include "cuda_utils.cuh"
 #include "horn_schunck.cuh"
+#include "pyramid.cuh"
 #include "warp.cuh"
 #include "blend.cuh"
 #include <cstdio>
@@ -105,8 +106,8 @@ int main(int argc, char** argv)
     CUDA_CHECK(cudaMalloc(&d_v, n_gray * sizeof(float)));
 
     // run Horn-Schunck: alpha=10 (smoothness), 100 iterations REMEMBER TO CHECK THIS AGAIN
-    horn_schunck(d_gray1, d_gray2, d_u, d_v, width, height, 10.0f, 100);
-    printf("Flow computed\n");
+    pyramidal_horn_schunck(d_gray1, d_gray2, d_u, d_v, width, height, 10.0f, 10, 4);
+    printf("Pyramidal Horn-Schunck computed\n");
 
     // warp frame1 forward by t=0.5 and frame2 backward by 1-t=0.5
     unsigned char *d_warped1, *d_warped2;
