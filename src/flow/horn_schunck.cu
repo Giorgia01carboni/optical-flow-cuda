@@ -113,12 +113,9 @@ void horn_schunck(
     float *d_u2, *d_v2;
     CUDA_CHECK(cudaMalloc(&d_u2, bytes_f));
     CUDA_CHECK(cudaMalloc(&d_v2, bytes_f));
-
-    // start with zero flow (no motion initially)
-    CUDA_CHECK(cudaMemset(d_u,  0, bytes_f));
-    CUDA_CHECK(cudaMemset(d_v,  0, bytes_f));
-    CUDA_CHECK(cudaMemset(d_u2, 0, bytes_f));
-    CUDA_CHECK(cudaMemset(d_v2, 0, bytes_f));
+    // Start from the initial estimate into the current buffers (d_u, d_v)
+    CUDA_CHECK(cudaMemcpy(d_u2, d_u, bytes_f, cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(d_v2, d_v, bytes_f, cudaMemcpyDeviceToDevice));
 
     // Divide the image into blocks of 16x16=256 thhreads.
     dim3 block(16, 16); 
