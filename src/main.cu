@@ -8,8 +8,11 @@
 #include "pyramid.cuh"
 #include "warp.cuh"
 #include "blend.cuh"
+#include "metrics.cuh"
+
+#include <cstring>
 #include <cstdio>
-#include <cmath>   // sqrtf
+#include <cmath>   
 
 __global__ void rgb_to_grayscale(
     const unsigned char* __restrict__ rgb,
@@ -47,16 +50,87 @@ __global__ void flow_to_image(
     out[idx] = (unsigned char)val;
 }
 
+// Colored flow, for debugging
+__device__ void hsv_to_rgb(float h, float s, float v,
+                           float& r, float& g, float& b) {
+    float c = v * s;
+    float hp = h / 60.0f;
+    float x = c * (1.0f - fabsf(fmodf(hp, 2.0f) - 1.0f));
+    float r1=0,g1=0,b1=0;
+    if (hp < 1)      { r1=c; g1=x; }
+    else if (hp < 2) { r1=x; g1=c; }
+    else if (hp < 3) { g1=c; b1=x; }
+    else if (hp < 4) { g1=x; b1=c; }
+    else if (hp < 5) { r1=x; b1=c; }
+    else             { r1=c; b1=x; }
+    float m = v - c;
+    r = r1+m; g = g1+m; b = b1+m;
+}
+
+__global__ void flow_to_color(
+    const float* __restrict__ u, const float* __restrict__ v,
+    unsigned char* __restrict__ out, int width, int height,
+    float max_mag)   // magnitudini >= max_mag saturano
+{
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    if (col >= width || row >= height) return;
+    int idx = row * width + col;
+
+    float fu = u[idx], fv = v[idx];
+    float mag = sqrtf(fu*fu + fv*fv);
+    float hue = (atan2f(fv, fu) + 3.14159265f) * (180.0f / 3.14159265f); // [0,360)
+    float sat = fminf(mag / max_mag, 1.0f);
+
+    float r,g,b;
+    hsv_to_rgb(hue, sat, 1.0f, r, g, b);
+    out[idx*3+0] = (unsigned char)(r*255.0f);
+    out[idx*3+1] = (unsigned char)(g*255.0f);
+    out[idx*3+2] = (unsigned char)(b*255.0f);
+}
+
 int main(int argc, char** argv)
 {
-    if (argc != 4) {
-        printf("Usage: %s <frame1> <frame2> <output_flow>\n", argv[0]);
+    // Just parsing configurations. Expected usage: ./optical_flow_cuda data/[dataset_name] [num_levels]
+    if (argc < 2 || argc > 3) {
+        printf("Usage: %s <data_folder> [num_levels]\n", argv[0]);
+        printf("  expects <data_folder>/frame10.png, frame11.png, and optional flow10.flo\n");
+        printf("  outputs go to data/results/\n");
         return 1;
     }
+    const char* data_folder = argv[1];
+    int num_levels = (argc == 3) ? atoi(argv[2]) : 4;
+    if (num_levels < 1) num_levels = 1;
+    printf("Pyramid levels: %d\n", num_levels);
 
-    const char* path1   = argv[1];
-    const char* path2   = argv[2];
-    const char* out_path = argv[3];
+    // derive the dataset name from the folder path 
+    char dataset_name[256];
+    {
+        const char* slash = strrchr(data_folder, '/');   // last '/' in the path
+        const char* name  = slash ? slash + 1 : data_folder;
+        strncpy(dataset_name, name, sizeof(dataset_name) - 1);
+        dataset_name[sizeof(dataset_name) - 1] = '\0';
+        // remove a trailing slash if the user passed ".../RubberWhale/"
+        size_t len = strlen(dataset_name);
+        if (len > 0 && dataset_name[len - 1] == '/') dataset_name[len - 1] = '\0';
+    }
+
+    // --- build the input paths from the folder ---
+    char path1[512], path2[512], gt_buf[512];
+    snprintf(path1, sizeof(path1), "%s/frame10.png", data_folder);
+    snprintf(path2, sizeof(path2), "%s/frame11.png", data_folder);
+    snprintf(gt_buf, sizeof(gt_buf), "%s/flow10.flo", data_folder);
+
+    // ground truth is optional: use it only if the file actually exists
+    const char* gt_path = nullptr;
+    {
+        FILE* probe = fopen(gt_buf, "rb");
+        if (probe) { fclose(probe); gt_path = gt_buf; }
+    }
+
+    // interpolated frame goes into data/results/<dataset>_interp.png 
+    char out_path[512];
+    snprintf(out_path, sizeof(out_path), "data/results/%s_interp.png", dataset_name);
 
     // load both frames on CPU
     int w1, h1, c1, w2, h2, c2;
@@ -106,8 +180,50 @@ int main(int argc, char** argv)
     CUDA_CHECK(cudaMalloc(&d_v, n_gray * sizeof(float)));
 
     // run Horn-Schunck: alpha=10 (smoothness), 100 iterations REMEMBER TO CHECK THIS AGAIN
-    pyramidal_horn_schunck(d_gray1, d_gray2, d_u, d_v, width, height, 10.0f, 10, 4);
+    pyramidal_horn_schunck(d_gray1, d_gray2, d_u, d_v, width, height, 0.5f, 300, num_levels);
+
     printf("Pyramidal Horn-Schunck computed\n");
+
+    {
+        unsigned char* d_flowviz;
+        CUDA_CHECK(cudaMalloc(&d_flowviz, n_gray));
+        flow_to_image<<<grid, block>>>(d_u, d_v, d_flowviz, width, height, 10.0f);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        unsigned char* h_flowviz = (unsigned char*)malloc(n_gray);
+        CUDA_CHECK(cudaMemcpy(h_flowviz, d_flowviz, n_gray, cudaMemcpyDeviceToHost));
+
+        char flow_path[512];
+        snprintf(flow_path, sizeof(flow_path), "data/results/%s_flow.png", dataset_name);
+        stbi_write_png(flow_path, width, height, 1, h_flowviz, width);
+        printf("Saved flow: %s\n", flow_path);
+
+        cudaFree(d_flowviz);
+        free(h_flowviz);
+    }
+
+    // Apply color coding to flow for better visualization of direction and magnitude (direction = hue, magnitude = saturation)
+    {
+        unsigned char* d_flowcol;
+        CUDA_CHECK(cudaMalloc(&d_flowcol, n_rgb));
+        flow_to_color<<<grid, block>>>(d_u, d_v, d_flowcol, width, height, 20.0f);
+        CUDA_CHECK(cudaDeviceSynchronize());
+
+        unsigned char* h_flowcol = (unsigned char*)malloc(n_rgb);
+        CUDA_CHECK(cudaMemcpy(h_flowcol, d_flowcol, n_rgb, cudaMemcpyDeviceToHost));
+
+        char colpath[512];
+        snprintf(colpath, sizeof(colpath), "data/results/%s_flowcolor.png", dataset_name);
+        stbi_write_png(colpath, width, height, 3, h_flowcol, width * 3);
+        printf("Saved flow color: %s\n", colpath);
+
+        cudaFree(d_flowcol);
+        free(h_flowcol);
+    }
+
+    if (gt_path) {
+        evaluate_average_endpoint_error(d_u, d_v, gt_path, width, height);
+    }
 
     // warp frame1 forward by t=0.5 and frame2 backward by 1-t=0.5
     unsigned char *d_warped1, *d_warped2;

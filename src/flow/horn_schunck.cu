@@ -39,9 +39,11 @@ __global__ void compute_gradients(
     float f2_u = f2[up   * width + col];
 
     int idx = row * width + col;
-    Ix[idx] = ((f1_r - f1_l) + (f2_r - f2_l)) * 0.25f;
-    Iy[idx] = ((f1_d - f1_u) + (f2_d - f2_u)) * 0.25f;
-    It[idx] = (float)f2[idx] - (float)f1[idx]; // temporal: frame2 - frame1
+
+    const float inv = 1.0f / 255.0f; // normalize to [0,1] range for better numerical stability
+    Ix[idx] = ((f1_r - f1_l) + (f2_r - f2_l)) * 0.25f * inv;
+    Iy[idx] = ((f1_d - f1_u) + (f2_d - f2_u)) * 0.25f * inv;
+    It[idx] = ((float)f2[idx] - (float)f1[idx]) * inv; // temporal: frame2 - frame1
 }
 
 
