@@ -13,6 +13,7 @@ add_executable(optical_flow
     src/interp/warp.cu
     src/interp/blend.cu
     src/utils/metrics.cu
+    src/utils/cpu_version.cu
 )
 
 target_include_directories(optical_flow PRIVATE include)

@@ -47,7 +47,7 @@ float* load_groundtruth_flow(const char* path, int* out_width, int* out_height)
 __global__ void endpoint_error_kernel(
     const float* __restrict__ u,            // our flow, horizontal
     const float* __restrict__ v,            // our flow, vertical
-    const float* __restrict__ groundtruth,  // true flow, interleaved [u,v,u,v,...]
+    const float* __restrict__ groundtruth,  // true flow, interleaved 
     float* __restrict__ endpoint_errors,    // OUT: error value for each pixel
     float* __restrict__ valid_mask,         // OUT: 1 = count this pixel, 0 = skip
     int width, int height)
@@ -77,13 +77,54 @@ __global__ void endpoint_error_kernel(
 }
 
 
-// 3) Putting it together: read GT, run the kernel, average the result
+// 3) PARALLEL REDUCTION (GPU): sum the per-pixel errors AND count valid pixels.
+//    Each block sums its slice in shared memory by halving the active
+//    threads every step, then writes one partial result. Done in 2 passes.
+
+#define REDUCE_THREADS 256
+
+__global__ void reduce_sum_kernel(
+    const float* __restrict__ errors,    // values to sum
+    const float* __restrict__ valid,     // 1/0 mask to sum (counts valid pixels)
+    float* __restrict__ partial_errors,  // OUT: one sum per block
+    float* __restrict__ partial_counts,  // OUT: one count per block
+    int n)
+{
+    __shared__ float s_err[REDUCE_THREADS];   // scratch: errors for this block
+    __shared__ float s_cnt[REDUCE_THREADS];   // scratch: counts for this block
+
+    int tid = threadIdx.x;
+    int i   = blockIdx.x * blockDim.x + threadIdx.x;
+
+    // load my element into shared memory (0 if past the end)
+    s_err[tid] = (i < n) ? errors[i] : 0.0f;
+    s_cnt[tid] = (i < n) ? valid[i]  : 0.0f;
+    __syncthreads();
+
+    // halve the active threads each step: tid 0 ends up with the block total
+    for (int stride = blockDim.x / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            s_err[tid] += s_err[tid + stride];
+            s_cnt[tid] += s_cnt[tid + stride];
+        }
+        __syncthreads();   // all adds of this step must finish before the next
+    }
+
+    // thread 0 writes this block's partial result
+    if (tid == 0) {
+        partial_errors[blockIdx.x] = s_err[0];
+        partial_counts[blockIdx.x] = s_cnt[0];
+    }
+}
+
+
+// 4) Putting it together: read GT, run the kernel, reduce on GPU, average
 
 double evaluate_average_endpoint_error(const float* d_u, const float* d_v,
                                        const char* gt_path,
                                        int width, int height)
 {
-    // --- read the ground truth into host memory ---
+    // read the ground truth into host memory
     int gt_width, gt_height;
     float* h_groundtruth = load_groundtruth_flow(gt_path, &gt_width, &gt_height);
     if (!h_groundtruth) return -1.0;
@@ -110,41 +151,53 @@ double evaluate_average_endpoint_error(const float* d_u, const float* d_v,
                           pixel_count * 2 * sizeof(float),
                           cudaMemcpyHostToDevice));
 
-    // --- compute the per-pixel error on the GPU ---
+    // compute the per-pixel error on the GPU
     endpoint_error_kernel<<<grid, block>>>(
         d_u, d_v, d_groundtruth,
         d_endpoint_errors, d_valid_mask, width, height);
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    // --- bring the per-pixel results back and average them ---
-    // REMEMBER: this final sum is done on the CPU for now. It is a simple reduction
-    // and could later become a parallel GPU reduction 
-    float* h_endpoint_errors = (float*)malloc(pixel_count * sizeof(float));
-    float* h_valid_mask      = (float*)malloc(pixel_count * sizeof(float));
-    CUDA_CHECK(cudaMemcpy(h_endpoint_errors, d_endpoint_errors,
-                          pixel_count * sizeof(float), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(h_valid_mask, d_valid_mask,
-                          pixel_count * sizeof(float), cudaMemcpyDeviceToHost));
+    // PARALLEL REDUCTION on GPU 
+    // Pass 1: each block reduces its slice into one partial value.
+    int num_blocks = (pixel_count + REDUCE_THREADS - 1) / REDUCE_THREADS;
+
+    float *d_partial_errors, *d_partial_counts;
+    CUDA_CHECK(cudaMalloc(&d_partial_errors, num_blocks * sizeof(float)));
+    CUDA_CHECK(cudaMalloc(&d_partial_counts, num_blocks * sizeof(float)));
+
+    reduce_sum_kernel<<<num_blocks, REDUCE_THREADS>>>(
+        d_endpoint_errors, d_valid_mask,
+        d_partial_errors, d_partial_counts, pixel_count);
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Pass 2: the partials are few (num_blocks), so just bring them back and
+    // finish the sum on CPU. (Cheaper than launching another kernel for so few values so I'll just keep that)
+    float* h_partial_errors = (float*)malloc(num_blocks * sizeof(float));
+    float* h_partial_counts = (float*)malloc(num_blocks * sizeof(float));
+    CUDA_CHECK(cudaMemcpy(h_partial_errors, d_partial_errors,
+                          num_blocks * sizeof(float), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_partial_counts, d_partial_counts,
+                          num_blocks * sizeof(float), cudaMemcpyDeviceToHost));
 
     double error_sum = 0.0;
-    long   valid_pixels = 0;
-    for (int i = 0; i < pixel_count; i++) {
-        if (h_valid_mask[i] > 0.5f) {       // only average the valid pixels
-            error_sum += h_endpoint_errors[i];
-            valid_pixels++;
-        }
+    double valid_pixels = 0.0;
+    for (int b = 0; b < num_blocks; b++) {
+        error_sum    += h_partial_errors[b];
+        valid_pixels += h_partial_counts[b];
     }
-    double average_epe = (valid_pixels > 0) ? error_sum / valid_pixels : 0.0;
+    double average_epe = (valid_pixels > 0.0) ? error_sum / valid_pixels : 0.0;
 
-    printf("Average EPE: %.4f px (over %ld valid pixels)\n",
+    printf("Average EPE: %.4f px (over %.0f valid pixels)\n",
            average_epe, valid_pixels);
 
-    free(h_endpoint_errors);
-    free(h_valid_mask);
+    free(h_partial_errors);
+    free(h_partial_counts);
     free(h_groundtruth);
     cudaFree(d_groundtruth);
     cudaFree(d_endpoint_errors);
     cudaFree(d_valid_mask);
+    cudaFree(d_partial_errors);
+    cudaFree(d_partial_counts);
 
     return average_epe;
 }

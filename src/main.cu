@@ -9,6 +9,7 @@
 #include "warp.cuh"
 #include "blend.cuh"
 #include "metrics.cuh"
+#include "cpu_version.cuh"
 
 #include <cstring>
 #include <cstdio>
@@ -172,6 +173,9 @@ int main(int argc, char** argv)
     rgb_to_grayscale<<<grid, block>>>(d_rgb1, d_gray1, width, height);
     rgb_to_grayscale<<<grid, block>>>(d_rgb2, d_gray2, width, height);
     CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Check cpu-gpu benchmark
+    benchmark_solver_cpu_vs_gpu(d_gray1, d_gray2, width, height, 0.5f, 300);
 
     // optical flow between the two frames
     // flow buffers —> one float per pixel per direction
