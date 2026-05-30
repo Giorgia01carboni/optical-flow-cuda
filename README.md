@@ -12,7 +12,7 @@ show a clear speedup of the parallel GPU solver over a sequential CPU baseline.
 
 | Frame 1 | Frame 2 | Interpolated (ours) |
 |---------|---------|---------------------|
-| ![frame1](docs/frame10.png) | ![frame2](docs/frame11.png) | ![result](docs/RubberWhale_interp.png) |
+| ![frame1](data/RubberWhale/frame10.png) | ![frame2](data/RubberWhale/frame11.png) | ![result](data/results/RubberWhale_interp.png) |
 
 ## Pipeline
 
